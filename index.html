@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="theme-color" content="#101827">
+<title>HT Internet</title>
+<style>
+:root{color-scheme:dark;--bg:#101827;--panel:#1e293b;--green:#16a34a;--muted:#aebbd0}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;background:radial-gradient(circle at top,#24334a,var(--bg) 60%);font-family:system-ui,Arial,sans-serif;color:#fff;display:flex;align-items:center;justify-content:center;padding:18px}
+main{width:min(100%,420px);text-align:center}
+.brand{font-size:12px;letter-spacing:4px;color:#86efac;font-weight:800}
+h1{margin:8px 0 4px;font-size:30px}
+.sub{color:var(--muted);font-size:14px;margin:0 0 24px}
+.panel{background:#172235;border:1px solid #334155;border-radius:22px;padding:20px;box-shadow:0 20px 50px #0005}
+label{display:block;text-align:left;font-size:13px;color:#cbd5e1;margin:0 0 7px}
+input{width:100%;padding:14px;border-radius:12px;border:1px solid #475569;background:#0f172a;color:white;font-size:16px;outline:none}
+button{font:inherit;border:0;cursor:pointer;touch-action:manipulation}
+#connect{width:100%;padding:14px;margin-top:12px;border-radius:12px;background:#2563eb;color:white;font-weight:750}
+#status{margin:18px 0 14px;color:#fbbf24;font-size:14px;min-height:22px}
+#talk{width:210px;height:210px;max-width:70vw;max-height:70vw;border-radius:50%;background:linear-gradient(145deg,#22c55e,#15803d);color:white;font-size:18px;font-weight:850;box-shadow:0 10px 0 #14532d,0 20px 35px #0006;user-select:none;-webkit-user-select:none}
+#talk:disabled{background:#475569;box-shadow:0 10px 0 #334155;color:#cbd5e1;cursor:not-allowed}
+#talk.active{background:linear-gradient(145deg,#f97316,#c2410c);box-shadow:0 10px 0 #7c2d12,0 20px 35px #0006;transform:translateY(5px)}
+.hint{font-size:12px;color:var(--muted);line-height:1.6;margin:22px 0 0}
+.led{display:inline-block;width:8px;height:8px;border-radius:50%;background:#64748b;margin-right:7px}
+#status.ok{color:#86efac}#status.ok .led{background:#22c55e}
+small{display:block;color:#94a3b8;margin-top:14px;line-height:1.5}
+</style>
+</head>
+<body>
+<main>
+  <div class="brand">PUSH TO TALK</div>
+  <h1>HT INTERNET</h1>
+  <p class="sub">Komunikasi suara antar-HP melalui internet</p>
+  <section class="panel">
+    <label for="room">Kode ruang (samakan di kedua HP)</label>
+    <input id="room" maxlength="40" autocomplete="off" autocapitalize="characters" placeholder="Contoh: TEMAN-4821">
+    <button id="connect">HUBUNGKAN</button>
+    <div id="status"><span class="led"></span>Belum terhubung</div>
+    <button id="talk" disabled>TEKAN &amp; TAHAN<br>UNTUK BICARA</button>
+    <p class="hint">Tekan dan tahan saat berbicara.<br>Lepaskan tombol agar mikrofon berhenti mengirim.</p>
+  </section>
+  <small>Perlu HTTPS dan server signaling WebRTC. Kode ini tidak mengirim suara jika server belum dikonfigurasi.</small>
+</main>
+<script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script>
+<script>
+/*
+  SETUP: replace this with your deployed HTTPS signaling server URL.
+  Example: https://your-ht-server.example
+*/
+const SIGNALING_URL = "https://YOUR-SIGNALING-SERVER.example";
+
+const roomEl=document.querySelector("#room");
+const connectBtn=document.querySelector("#connect");
+const talkBtn=document.querySelector("#talk");
+const statusEl=document.querySelector("#status");
+let socket=null,pc=null,localStream=null,room="",peerId=null,remoteReady=false;
+let pendingCandidates=[];
+function status(text,ok=false){statusEl.className=ok?"ok":"";statusEl.innerHTML='<span class="led"></span>'+text}
+function sendSignal(data){if(socket&&peerId)socket.emit("signal",{...data,target:peerId})}
+function makePeer(){
+  if(pc)return pc;
+  pc=new RTCPeerConnection({iceServers:[
+    {urls:"stun:stun.l.google.com:19302"}
+    // Production deployments may need an authenticated TURN server.
+  ]});
+  pc.onicecandidate=e=>{if(e.candidate)sendSignal({type:"candidate",candidate:e.candidate.candidate,sdpMid:e.candidate.sdpMid,sdpMLineIndex:e.candidate.sdpMLineIndex})};
+  pc.ontrack=e=>{
+    let audio=document.querySelector("#remoteAudio");
+    if(!audio){audio=document.createElement("audio");audio.id="remoteAudio";audio.autoplay=true;audio.playsInline=true;document.body.appendChild(audio)}
+    audio.srcObject=e.streams[0];
+    audio.play().catch(()=>status("Ketuk layar agar audio dapat diputar"));
+  };
+  pc.onconnectionstatechange=()=>{
+    if(pc.connectionState==="connected"){status("Terhubung — siap bicara",true);talkBtn.disabled=false}
+    else if(pc.connectionState==="failed"){status("Koneksi gagal; jaringan mungkin memerlukan TURN");talkBtn.disabled=true}
+    else if(pc.connectionState==="disconnected"){status("Koneksi terputus…");talkBtn.disabled=true}
+  };
+  localStream.getTracks().forEach(t=>{t.enabled=false;pc.addTrack(t,localStream)});
+  return pc;
+}
+async function offer(){
+  const p=makePeer();
+  const o=await p.createOffer();
+  await p.setLocalDescription(o);
+  sendSignal({type:"offer",sdp:p.localDescription.sdp});
+}
+async function handleSignal(d){
+  try{
+    if(d.type==="offer"){
+      const p=makePeer();
+      await p.setRemoteDescription({type:"offer",sdp:d.sdp});remoteReady=true;
+      for(const c of pendingCandidates)await p.addIceCandidate(c);pendingCandidates=[];
+      const a=await p.createAnswer();await p.setLocalDescription(a);
+      sendSignal({type:"answer",sdp:p.localDescription.sdp});
+    }else if(d.type==="answer"&&pc){
+      await pc.setRemoteDescription({type:"answer",sdp:d.sdp});remoteReady=true;
+      for(const c of pendingCandidates)await pc.addIceCandidate(c);pendingCandidates=[];
+    }else if(d.type==="candidate"){
+      const c={candidate:d.candidate,sdpMid:d.sdpMid,sdpMLineIndex:d.sdpMLineIndex};
+      if(pc&&remoteReady)await pc.addIceCandidate(c);else pendingCandidates.push(c);
+    }
+  }catch(e){console.error(e);status("Negosiasi audio gagal: "+e.message)}
+}
+connectBtn.addEventListener("click",async()=>{
+  room=roomEl.value.trim().toUpperCase();
+  if(!room){roomEl.focus();status("Masukkan kode ruang terlebih dahulu");return}
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){status("Browser perlu HTTPS untuk akses mikrofon");return}
+  if(SIGNALING_URL.includes("YOUR-SIGNALING-SERVER")){
+    status("Server belum diatur. Lihat petunjuk di file README.");
+    return;
+  }
+  connectBtn.disabled=true;roomEl.disabled=true;
+  try{
+    status("Meminta izin mikrofon…");
+    localStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true},video:false});
+    localStream.getAudioTracks().forEach(t=>t.enabled=false);
+    socket=io(SIGNALING_URL,{transports:["websocket","polling"]});
+    socket.on("connect",()=>{status("Server tersambung — masuk ruang…");socket.emit("join-room",{room})});
+    socket.on("joined",async d=>{
+      if(d.peerId){peerId=d.peerId;status("HP kedua ditemukan — menghubungkan…");await offer()}
+      else status("Menunggu HP kedua…");
+    });
+    socket.on("peer-joined",d=>{peerId=d.peerId;status("HP kedua masuk — menunggu koneksi…")});
+    socket.on("signal",handleSignal);
+    socket.on("peer-left",()=>{peerId=null;talkBtn.disabled=true;status("HP lain terputus — menunggu…");if(pc){pc.close();pc=null}remoteReady=false;pendingCandidates=[]});
+    socket.on("room-full",()=>status("Ruang penuh; gunakan ruang lain"));
+    socket.on("connect_error",()=>status("Gagal terhubung ke server; periksa URL dan internet"));
+  }catch(e){
+    console.error(e);status(e.name==="NotAllowedError"?"Izin mikrofon ditolak":("Tidak dapat memulai: "+e.message));
+    connectBtn.disabled=false;roomEl.disabled=false;
+  }
+});
+function startTalk(e){e.preventDefault();if(talkBtn.disabled||!localStream)return;localStream.getAudioTracks().forEach(t=>t.enabled=true);talkBtn.classList.add("active");talkBtn.innerHTML="SEDANG<br>BICARA…";status("Mikrofon aktif — bicara sekarang",true)}
+function stopTalk(e){if(e)e.preventDefault();if(localStream)localStream.getAudioTracks().forEach(t=>t.enabled=false);talkBtn.classList.remove("active");talkBtn.innerHTML="TEKAN &amp; TAHAN<br>UNTUK BICARA";if(pc&&pc.connectionState==="connected")status("Terhubung — siap bicara",true)}
+talkBtn.addEventListener("pointerdown",startTalk);
+["pointerup","pointercancel","pointerleave","contextmenu"].forEach(ev=>talkBtn.addEventListener(ev,stopTalk));
+document.addEventListener("visibilitychange",()=>{if(document.hidden)stopTalk()});
+</script>
+</body>
+</html>
